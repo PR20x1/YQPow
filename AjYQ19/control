@@ -1,0 +1,9 @@
+Package: com.lunite.codm
+Name: Lunite CoDM 
+Depends: mobilesubstrate, preferenceloader
+Version: 1.0.49
+Architecture: iphoneos-arm
+Description: Mod Menu for CoD: Mobile 
+Maintainer: Lunite
+Author: DarkLuna
+

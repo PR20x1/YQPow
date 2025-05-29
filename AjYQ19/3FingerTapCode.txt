@@ -1,0 +1,690 @@
+#import <Foundation/Foundation.h>
+#import <UIKit/UIKit.h>
+#import <Metal/Metal.h>
+#import <MetalKit/MetalKit.h>
+#include "imgui/imgui.h"
+#include "imgui/imgui_impl_metal.h"
+
+#import "Utilities/Macros.h"
+#import "Utilities/Obfuscate.h"
+#import "Utilities/XORstring.h"
+
+#import "UnityStructs/Quaternion.hpp"
+#import "UnityStructs/Vector3.h"
+#import "UnityStructs/Vector2.h"
+#import "UnityStructs/Vector4.h"
+#import "UnityStructs/Matrix4x4.h"
+#import "UnityStructs/Unity.h"
+
+#import "Draw/Draw.h"
+
+#include "CheatState/CheatState.hpp"
+
+#include "ModController.h"
+
+#include "font.h"
+#include "iconcpp.h"
+#include "icons.h"
+
+#import "Stream/HeeeNoScreenShotView.h"
+#import "Hosts/NSObject+URL.h"
+
+#define kWidth  [UIScreen mainScreen].bounds.size.width
+#define kHeight [UIScreen mainScreen].bounds.size.height
+#define kScale [UIScreen mainScreen].scale
+
+#define ICON_FA_BULLET "" // Call of Duty Mobile IOS 1.7.49 
+
+@interface InheritGesture : UITapGestureRecognizer
+@property (nonatomic) int number;
+@property (nonatomic) NSString *text;
+@property (nonatomic) void (*ptr)();
+@end
+
+@implementation InheritGesture: UITapGestureRecognizer
+@end
+
+@implementation ModController
+
+static int totalEnemies = 0;
+static float tDis = 0, tDistance = 0, markDistance, markDis;
+Vector3 TargetPos;
+static bool needAdjustAim = false;
+static Vector2 markScreenPos;
+
+void *(*GetMainCamera)() = (void *(*)())getRealOffset(0x106CD5234); // public static Camera get_main() { } // 1 lista
+void *(*GetComponentTransform)(void *component) = (void *(*)(void *))getRealOffset(0x106CDAB24); // public Transform get_transform() { } // 1 lista
+void (*GetTransformPosition)(void *transform, Vector3 *out) = (void (*)(void *, Vector3 *))getRealOffset(0x106D4E5BC); // private void INTERNAL_get_position(out Vector3 value) { } // 1 lista
+
+Vector3 GetPlayerPosition(void *player) {
+    Vector3 location;
+    GetTransformPosition(GetComponentTransform(player), &location);
+    return location;
+}
+
+Vector3 GetTransformPositionInternal(void *transform) {
+    Vector3 location;
+    GetTransformPosition(transform, &location);
+    return location;
+}
+
+Matrix4x4 (*GetWorldToCameraMatrix)(void* camera) = (Matrix4x4(*)(void*))getRealOffset(0x106CD4AF8); // public Matrix4x4 get_worldToCameraMatrix() { } // 1 lista
+Matrix4x4 GetWorldToCamera() {
+    if (GetMainCamera() != nullptr) {
+        return GetWorldToCameraMatrix(GetMainCamera());
+    }
+    return Matrix4x4();
+}
+
+Matrix4x4 (*GetProjectionMatrix)(void* camera) = (Matrix4x4(*)(void*))getRealOffset(0x106CD4BE0); // public Matrix4x4 get_projectionMatrix() { } // 1 lista
+Matrix4x4 GetProjectionMatrixInternal() {
+    if (GetMainCamera() != nullptr) {
+        return GetProjectionMatrix(GetMainCamera());
+    }
+    return Matrix4x4();
+}
+
+void* (*GetGameplayInstance)() = (void *(*)())getRealOffset(0x101894B20); // public static BaseGame get_Game() { } // 1 lista
+bool (*IsAlive)(void *info) = (bool (*)(void *))getRealOffset(0x1011CBF1C); // public override bool get_IsAlive() { } // 3 lista
+bool (*IsRobot)(void *info) = (bool (*)(void *))getRealOffset(0x101DB06E4); // public bool get_IsRobot() { } // 1 lista
+float (*GetHealth)(void *pawn) = (float (*)(void*))getRealOffset(0x1011C8594); // public override float get_Health() { } // 4 lista
+
+Vector4 GetViewCoords(Vector3 pos, Matrix4x4 modelViewMatrix) {
+    Vector4 viewPos = Vector4(0, 0, 0, 0);
+    viewPos.X = pos.x * modelViewMatrix[0][0] + pos.y * modelViewMatrix[1][0] + pos.z * modelViewMatrix[2][0] + modelViewMatrix[3][0];
+    viewPos.Y = pos.x * modelViewMatrix[0][1] + pos.y * modelViewMatrix[1][1] + pos.z * modelViewMatrix[2][1] + modelViewMatrix[3][1];
+    viewPos.Z = pos.x * modelViewMatrix[0][2] + pos.y * modelViewMatrix[1][2] + pos.z * modelViewMatrix[2][2] + modelViewMatrix[3][2];
+    viewPos.W = pos .x * modelViewMatrix[0][3] + pos.y * modelViewMatrix[1][3] + pos.z * modelViewMatrix[2][3] + modelViewMatrix[3][3];
+    return viewPos;
+}
+
+Vector4 GetClipCoords(Vector4 pos, Matrix4x4 projectionMatrix) {
+    Vector4 clipPos = Vector4(0, 0, 0, 0);
+    clipPos.X = pos.X * projectionMatrix[0][0] + pos.Y * projectionMatrix[1][0] + pos.Z * projectionMatrix[2][0] + pos.W * projectionMatrix[3][0];
+    clipPos.Y = pos.X * projectionMatrix[0][1] + pos.Y * projectionMatrix[1][1] + pos.Z * projectionMatrix[2][1] + pos.W * projectionMatrix[3][1];
+    clipPos.Z = pos.X * projectionMatrix[0][2] + pos.Y * projectionMatrix[1][2] + pos.Z * projectionMatrix[2][2] + pos.W * projectionMatrix[3][2];
+    clipPos.W = pos.X * projectionMatrix[0][3] + pos.Y * projectionMatrix[1][3] + pos.Z * projectionMatrix[2][3] + pos.W * projectionMatrix[3][3];
+    return clipPos;
+}
+
+Vector3 NormalizeCoords(Vector4 pos) {
+    Vector3 normalized = Vector3(0, 0, 0);
+    normalized.x = pos.X / pos.W;
+    normalized.y = pos.Y / pos.W;
+    normalized.z = pos.Z / pos.W;
+    return normalized;
+}
+
+Vector2 GetScreenCoords(Vector3 pos) {
+    Vector2 screen = Vector2(0, 0);
+    screen.X = (kWidth / 2.0 * pos.x) + (pos.x + kWidth / 2.0);
+    screen.Y = -(kHeight / 2.0 * pos.y) + (pos.y + kHeight / 2.0);
+    return screen;
+}
+
+NSString * GetEnemyName(float distance, void* enemyInfo) {
+    NSString *dis = [NSString stringWithFormat:@"%d", (int)distance];
+    _monoString *m_NickName = *(_monoString **)((uint64_t)enemyInfo + 0x148); // protected string m_NickName // 1 lista
+    NSString *nameEnemy = m_NickName->toNSString();
+    bool isRobot;
+    if (*IsRobot != nullptr) {
+        isRobot = IsRobot(enemyInfo);
+    } else {
+        isRobot = false;
+    }
+    if (isRobot || nameEnemy.length == 0) {
+        nameEnemy = @"[AI]";
+    }
+    NSString *nameAndDistance = [NSString stringWithFormat:@"[%@M] %@", dis, nameEnemy];
+    return nameAndDistance;
+}
+
+static bool MenDeal = true;
+ImFont *_espFont;
+HeeeNoScreenShotView *noScreenShotView;
+UILabel *menuTitle;
+
+-(BOOL)shouldAutorotate {
+    return NO;
+}
+
+- (BOOL)shouldAutorotateToInterfaceOrientation:(UIInterfaceOrientation)toInterfaceOrientation {
+    return NO;
+}
+
+- (UIInterfaceOrientation)preferredInterfaceOrientationForPresentation {
+    return UIInterfaceOrientationLandscapeRight;
+}
+
+-(instancetype)initWithNibName:(nullable NSString *)nibNameOrNil bundle:(nullable NSBundle *)nibBundleOrNil {
+    self = [super initWithNibName:nibNameOrNil bundle:nibBundleOrNil];
+    _device = MTLCreateSystemDefaultDevice();
+    _commandQueue = [_device newCommandQueue];
+    if (!self.device) {
+        NSLog(@"Metal is not supported");
+        abort();
+    }
+    menuTitle = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, 200, 30)];
+    menuTitle.text = [NSString stringWithUTF8String:make_string("Lunite").c_str()];
+    menuTitle.textColor = UIColorFromHex(0x72FF13);
+    menuTitle.font = [UIFont fontWithName:[NSString stringWithUTF8String:make_string("AppleSDGothicNeo-Light").c_str()] size:19.0f];
+    menuTitle.textAlignment = NSTextAlignmentCenter;
+    [menuTitle sizeToFit];
+    UIWindow *mainWindow = [UIApplication sharedApplication].keyWindow;
+    menuTitle.center = CGPointMake(CGRectGetMidX(mainWindow.bounds), 20);
+    menuTitle.adjustsFontSizeToFitWidth = true;
+    [mainWindow addSubview:menuTitle];
+    
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGuiIO& io = ImGui::GetIO(); (void)io;
+    ImGui::StyleColorsDark();
+    NSString *FontPath = @"/System/Library/Fonts/AppFonts/AppleGothic.otf";
+    static const ImWchar icons_ranges[] = { 0xf000, 0xf3ff, 0 };
+    ImFontConfig icons_config;
+    ImFontConfig CustomFont;
+    CustomFont.FontDataOwnedByAtlas = false;
+
+    icons_config.MergeMode = true;
+    icons_config.PixelSnapH = true;
+
+    io.Fonts->AddFontFromMemoryTTF(const_cast<std::uint8_t*>(Custom), sizeof(Custom), 21.f, &CustomFont);
+    _espFont = io.Fonts->AddFontFromMemoryCompressedTTF(font_awesome_data, font_awesome_size, 19.0f, &icons_config, icons_ranges);
+    io.Fonts->AddFontDefault();
+    ImGui_ImplMetal_Init(_device);
+    return self;
+}
+
+-(MTKView *)mtkView {
+    return (MTKView *)self.view;
+}
+
+- (void)openMenu:(UITapGestureRecognizer *)tap {
+    if (tap.state == UIGestureRecognizerStateEnded) {
+        MenDeal = true;
+    }
+}
+
+-(void)loadView {
+    CGFloat w = [UIApplication sharedApplication].windows[0].rootViewController.view.frame.size.width;
+    CGFloat h = [UIApplication sharedApplication].windows[0].rootViewController.view.frame.size.height;
+    self.view = [[MTKView alloc] initWithFrame:CGRectMake(0, 0, w, h)];
+    noScreenShotView = [[HeeeNoScreenShotView alloc] initWithFrame:[UIScreen mainScreen].bounds];
+    noScreenShotView.backgroundColor = [UIColor clearColor];
+    noScreenShotView.userInteractionEnabled = NO;
+    [[UIApplication sharedApplication].keyWindow addSubview:noScreenShotView];
+}
+
+-(void)viewDidLoad {
+    [super viewDidLoad];
+    self.mtkView.device = self.device;
+    self.mtkView.delegate = self;
+    self.mtkView.clearColor = MTLClearColorMake(0, 0, 0, 0);
+    self.mtkView.backgroundColor = [UIColor colorWithRed:0 green:0 blue:0 alpha:0];
+    self.mtkView.clipsToBounds = YES;
+    self.window = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
+    self.window.rootViewController = self;
+    self.window.hidden = NO;
+    self.view.hidden = NO;
+    [noScreenShotView addSubview:self.window];
+    UIWindow *mainWindow = [UIApplication sharedApplication].keyWindow;
+    UITapGestureRecognizer *tapGestureRecognizerMenuH = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(openMenu:)];
+    tapGestureRecognizerMenuH.numberOfTapsRequired = 3;
+    tapGestureRecognizerMenuH.numberOfTouchesRequired = 3;
+    [mainWindow addGestureRecognizer:tapGestureRecognizerMenuH];
+}
+
+#pragma mark - MTKViewDelegate
+
+-(void)drawInMTKView:(MTKView*)view {
+    NSString *deviceModel = [[UIDevice currentDevice] model];
+    UIDevice *device = [UIDevice currentDevice];
+    NSString *systemVersion = [device systemVersion];
+    ImGuiIO& io = ImGui::GetIO();
+    io.DisplaySize.x = view.bounds.size.width;
+    io.DisplaySize.y = view.bounds.size.height;
+    CGFloat framebufferScale = view.window.screen.scale ?: UIScreen.mainScreen.scale;
+    io.DisplayFramebufferScale = ImVec2(framebufferScale, framebufferScale);
+    io.DeltaTime = 1 / float(view.preferredFramesPerSecond ?: 60);
+    id<MTLCommandBuffer> commandBuffer = [self.commandQueue commandBuffer];
+    MTLRenderPassDescriptor* renderPassDescriptor = view.currentRenderPassDescriptor;
+    if (renderPassDescriptor == nil) {
+        [commandBuffer commit];
+        return;
+    }
+
+    if (MenDeal == true) {
+        [self.view setUserInteractionEnabled:YES];
+        [self.window setUserInteractionEnabled:YES];
+    } else {
+        [self.view setUserInteractionEnabled:NO];
+        [self.window setUserInteractionEnabled:NO];
+    }
+
+    ImGui_ImplMetal_NewFrame(renderPassDescriptor);
+    ImGui::NewFrame();
+    ImFont* font = ImGui::GetFont();
+    font->Scale = 16.f / font->FontSize;
+    CGFloat x = (([UIApplication sharedApplication].windows[0].rootViewController.view.frame.size.width) - 380) / 2;
+    CGFloat y = (([UIApplication sharedApplication].windows[0].rootViewController.view.frame.size.height) - 260) / 2;
+    ImGui::SetNextWindowPos(ImVec2(x, y), ImGuiCond_FirstUseEver);
+    
+    if (MenDeal == true) {
+        ImGui::Begin(make_string("Call of Duty Mobile KR").c_str(), &MenDeal, ImGuiWindowFlags_AlwaysAutoResize);
+        ImGui::PushItemWidth(ImGui::GetWindowWidth() * 0.55f);
+
+        // Left side buttons
+        ImGui::BeginGroup();
+        if (ImGui::Button(make_string(ICON_FA_CROSSHAIRS " Aim").c_str(), ImVec2(100, 50))) {
+            CheatState::currentPage = 0;
+        }
+        if (ImGui::Button(make_string(ICON_FA_EYE " ESP").c_str(), ImVec2(100, 50))) {
+            CheatState::currentPage = 1;
+        }
+        if (ImGui::Button(make_string(ICON_FA_COGS " Config").c_str(), ImVec2(100, 50))) {
+            CheatState::currentPage = 2;
+        }
+        ImGui::EndGroup();
+
+        ImGui::SameLine();
+
+        // Right side content
+        ImGui::BeginGroup();
+        if (CheatState::currentPage == 0) {
+            ImGui::Spacing();
+            ImGui::Checkbox(make_string("Enable Aimbot").c_str(), &CheatState::enable_aimbot);
+            ImGui::Combo(make_string("Aim Target").c_str(), &CheatState::aim_target,  "Closest\0Inside FOV\0FOV Aim Lock\0");
+            ImGui::Combo(make_string("Aim Location").c_str(), &CheatState::aim_location, "Head\0Chest\0Legs\0");
+            ImGui::Combo(make_string("Aim Trigger").c_str(), &CheatState::aim_trigger, "Always\0Firing\0Aiming\0");
+            ImGui::SliderFloat(make_string("Speed (deg/s)").c_str(), &CheatState::aim_speed, 0.0f, 15.0f);
+            ImGui::SliderFloat(make_string("Max Distance").c_str(), &CheatState::max_distance, 0.0f, 500.0f);
+            ImGui::SliderInt(make_string("Circle Size").c_str(), &CheatState::circleSizeValue, 0, 360);
+        } else if (CheatState::currentPage == 1) {
+            ImGui::Spacing();
+            ImGui::Checkbox(make_string("Enable Esp").c_str(), &CheatState::show_esp);
+            ImGui::Separator();
+            ImGui::Checkbox(make_string("Esp - Lines").c_str(), &CheatState::show_esplines);
+            ImGui::Checkbox(make_string("Esp - Boxes").c_str(), &CheatState::show_espboxes);
+            ImGui::Checkbox(make_string("Esp - Health").c_str(), &CheatState::show_esp_health);
+            ImGui::Checkbox(make_string("Esp - Name").c_str(), &CheatState::show_esp_name);
+            ImGui::Checkbox(make_string("Esp - Distance").c_str(), &CheatState::show_esp_distance);
+            ImGui::Separator();
+            ImGui::SliderInt(make_string("Esp - Distance").c_str(), &CheatState::distanceValue, 0, 200);
+            ImGui::Spacing();
+        } else if (CheatState::currentPage == 2) {
+            ImGui::Checkbox(make_string("Stream Mode").c_str(), &CheatState::stream_mode);
+            ImGui::Spacing();
+            ImGui::Checkbox(make_string("Hide Top Label").c_str(), &CheatState::hide_top_label);
+            ImGui::Spacing();
+            ImGui::Checkbox(make_string("Circle FOV").c_str(), &CheatState::enable_circleFov);
+            ImGui::Spacing();
+            ImGui::ColorEdit3(make_string("Color Esp").c_str(), &*(float*)CheatState::colorEsp, ImGuiColorEditFlags_NoInputs);
+            ImGui::Spacing();
+            if (ImGui::Combo(make_string("Color Menu").c_str(), &CheatState::style_idx, "Dark\0Light\0Classic\0")) {
+                switch (CheatState::style_idx) {
+                    case 0: ImGui::StyleColorsDark(); break;
+                    case 1: ImGui::StyleColorsLight(); break;
+                    case 2: ImGui::StyleColorsClassic(); break;
+                }
+            }
+            ImGui::Spacing();
+        }
+        ImGui::EndGroup();
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+        ImGui::Text("Device: %s", [deviceModel UTF8String]);
+        ImGui::Text("iOS: %s", [systemVersion UTF8String]);
+
+        ImGui::Text("JB:");
+        ImGui::SameLine();
+        if (isJailbroken()) {
+            ImGui::TextColored(ImColor(255, 0, 0), "JB");
+        } else {
+            ImGui::TextColored(ImColor(0, 128, 0), "NonJB");
+        }
+
+        ImGuiStyle& style = ImGui::GetStyle();
+        style.WindowRounding = 10.000f;
+        style.WindowTitleAlign = ImVec2(0.5f,  0.5f);
+        style.ChildRounding = 6.000f;
+        style.PopupRounding = 6.000f;
+        style.FrameRounding = 6.000f;
+        style.FrameBorderSize = 1.000f;
+        style.GrabRounding = 12.000f;
+        style.TabRounding = 7.000f;
+        style.ButtonTextAlign = ImVec2(0.510f, 0.490f);
+        style.Alpha = 0.9f;
+
+        ImGui::End();
+    }
+
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        [NSObject load];
+    });
+
+    if (CheatState::stream_mode) {
+        [noScreenShotView setSecure:YES];
+    } else {
+        [noScreenShotView setSecure:NO];
+    }
+
+    if (CheatState::hide_top_label) {
+        menuTitle.hidden = YES;
+    } else {
+        menuTitle.hidden = NO;
+    }
+
+    totalEnemies = 0;
+    tDistance = 0;
+    needAdjustAim = false;
+    markDistance = kWidth;
+    markScreenPos = Vector2(kWidth / 2, kHeight / 2);
+    markDis = kWidth;
+    tDis = 0;
+    float closestDistance = std::numeric_limits<float>::infinity();
+
+NSLog(@"[Menu-ESP] show_esplines: %d, show_esp_health: %d", CheatState::show_esplines, CheatState::show_esp_health);
+
+if (CheatState::show_esp) {
+    if (*GetGameplayInstance) {
+        auto gameInstance = GetGameplayInstance();
+        if (gameInstance != nullptr) {
+            Matrix4x4 viewMatrix = GetWorldToCamera();
+            Matrix4x4 projectionMatrix = GetProjectionMatrixInternal();
+            monoList<void **> *enemyList = *(monoList<void **>**)((uint64_t)gameInstance + 0x168); // private readonly PawnList EnemyPawns
+            if (enemyList != nullptr) {
+                int enemyCount = enemyList->getSize();
+                for (int i = 0; i < enemyCount; i++) {
+                    void* enemyInfo = *(void **)((uint64_t)enemyList->getItems()[i] + 0x590); // protected PlayerInfo m_PlayerInfo // 2 lista
+                    if (enemyInfo != nullptr) {
+                        Vector3 enemyPositionWorld = GetPlayerPosition(enemyList->getItems()[i]);
+                        Vector4 enemyPositionView = GetViewCoords(enemyPositionWorld, viewMatrix);
+                        Vector4 enemyPositionClip = GetClipCoords(enemyPositionView, projectionMatrix);
+                        Vector3 enemyPositionNormalized = NormalizeCoords(enemyPositionClip);
+                        Vector2 enemyPositionScreen = GetScreenCoords(enemyPositionNormalized);
+
+                        void* headBone = *(void **)((uint64_t)enemyList->getItems()[i] + 0x2E8); // protected Transform m_HeadBone 
+                        if (headBone != nullptr) {
+                            Vector3 enemyHeadPositionWorld = GetTransformPositionInternal(headBone);
+                            Vector4 enemyHeadPositionView = GetViewCoords(enemyHeadPositionWorld, viewMatrix);
+                            Vector4 enemyHeadPositionClip = GetClipCoords(enemyHeadPositionView, projectionMatrix);
+                            enemyHeadPositionClip.Y = enemyHeadPositionClip.Y + 0.5f;
+                            Vector3 enemyHeadPositionNormalized = NormalizeCoords(enemyHeadPositionClip);
+                            Vector2 enemyHeadPositionScreen = GetScreenCoords(enemyHeadPositionNormalized);
+
+                            bool isFacing = (enemyPositionClip.Z >= 0.01f);
+                            bool isVisible = (enemyPositionScreen.X >= 0 && enemyPositionScreen.X <= kWidth);
+                            if (isVisible && isFacing) {
+                                void* (*getLocalPawn)() = (void *(*)())getRealOffset(0x1018C1E04); // public static Pawn get_LocalPawn() { }
+                                void *localPawn = getLocalPawn();
+                                Vector3 localPlayerPosition = Vector3(0, 0, 0);
+                                if (localPawn != nullptr) {
+                                    localPlayerPosition = GetPlayerPosition(localPawn);
+                                }
+
+                                float distance = Vector3::Distance(localPlayerPosition, enemyPositionWorld);
+                                bool shouldShow = CheatState::distanceValue >= distance; // Initialize shouldShow
+                                NSString *enemyName = GetEnemyName(distance, enemyInfo);
+
+                                bool isAlive = false; // Initialize isAlive
+                                if (*IsAlive != nullptr) {
+                                    isAlive = IsAlive(enemyList->getItems()[i]);
+                                }
+                                if (!isAlive) continue;
+
+                                // Draw ESP Lines (inverted from the bottom of the screen)
+                                if (CheatState::show_esplines && isAlive) {
+                                    ImColor lineColor = ImColor(CheatState::colorEsp[0], CheatState::colorEsp[1], CheatState::colorEsp[2]);
+                                    if (distance < closestDistance) {
+                                        lineColor = ImColor(0, 255, 0);
+                                        closestDistance = distance;
+                                    }
+                                    // Draw line from the Top of the screen to the enemy's head position
+                                    RenderLine(ImVec2(kWidth / 2, 0), ImVec2(enemyHeadPositionScreen.X, enemyHeadPositionScreen.Y), lineColor, 0.9);
+
+                                    // Draw ESP Health (dependent on ESP lines)
+                                    if (CheatState::show_esp_health && isAlive) {
+                                        float health = 0.0f;
+                                        float maxHealth = 0.0f;
+                                        if (*GetHealth != nullptr) {
+                                            health = GetHealth(enemyList->getItems()[i]);
+                                        }
+                                        void* attackableInfo = *(void **)((uint64_t)enemyList->getItems()[i] + 0x78); // private AttackableTargetInfo m_AttackableInfo
+                                        maxHealth = *(float *)((uint64_t)attackableInfo + 0x38); // protected float m_MaxHealth
+                                        hpasddsfhjdjhsbsd(health, maxHealth, enemyHeadPositionScreen.X, enemyHeadPositionScreen.Y, 50.0f, 10.0f); // Draw health bar
+                                    }
+                                }
+
+                                // Draw ESP Name
+                                if (CheatState::show_esp_name && shouldShow && isAlive) {
+                                    ImVec2 nameWidth = _espFont->CalcTextSizeA(12.0f, MAXFLOAT, 0.0f, [enemyName UTF8String]);
+                                    DrawText2(_espFont, 12, ImVec2(enemyHeadPositionScreen.X - (nameWidth.x / 2.0f), enemyHeadPositionScreen.Y - 16), ImColor(255, 255, 51), [enemyName UTF8String], ImColor(0, 0, 0, 190));
+                                }
+
+                                // Draw ESP Distance
+                                if (CheatState::show_esp_distance && shouldShow && isAlive) {
+                                    NSString *distanceText = [NSString stringWithFormat:@"%.1fm", distance];
+                                    ImVec2 distanceWidth = _espFont->CalcTextSizeA(12.0f, MAXFLOAT, 0.0f, [distanceText UTF8String]);
+                                    DrawText2(_espFont, 12, ImVec2(enemyHeadPositionScreen.X - (distanceWidth.x / 2.0f), enemyHeadPositionScreen.Y + 10), ImColor(255, 255, 51), [distanceText UTF8String], ImColor(0, 0, 0, 190));
+                                }
+
+                                // Draw ESP Boxes
+                                if (CheatState::show_espboxes && shouldShow && isAlive) {
+                                    float height = abs(enemyPositionScreen.Y - enemyHeadPositionScreen.Y);
+                                    float width = height * 0.65f;
+                                    DrawBox(enemyHeadPositionScreen.X - (width * 0.5f), enemyHeadPositionScreen.Y, width, height, ImColor(CheatState::colorEsp[0], CheatState::colorEsp[1], CheatState::colorEsp[2]), 0.9, 1.0f);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}  if (CheatState::enable_aimbot) {
+        Aimbot(); // Enable aimbot functionality
+    }
+
+    auto draw = ImGui::GetBackgroundDrawList();
+    if (CheatState::enable_circleFov) {
+        // Draw an octagon instead of a circle
+        ImVec2 center = ImVec2(kWidth / 2, kHeight / 2);
+        float radius = CheatState::circleSizeValue;
+        ImColor color = IM_COL32(255, 0, 0, 255);
+        float angle = 2.0f * M_PI / 8.0f; // 8 sides for an octagon
+
+        for (int i = 0; i < 8; i++) {
+            ImVec2 start = ImVec2(center.x + radius * cos(i * angle), center.y + radius * sin(i * angle));
+            ImVec2 end = ImVec2(center.x + radius * cos((i + 1) * angle), center.y + radius * sin((i + 1) * angle));
+            draw->AddLine(start, end, color, 1.0f);
+        }
+    }
+
+    ImGui::Render();
+    ImDrawData* drawData = ImGui::GetDrawData();
+    id <MTLRenderCommandEncoder> renderEncoder = [commandBuffer renderCommandEncoderWithDescriptor:renderPassDescriptor];
+    [renderEncoder pushDebugGroup:@"Dear ImGui rendering"];
+    ImGui_ImplMetal_RenderDrawData(drawData, commandBuffer, renderEncoder);
+    [renderEncoder popDebugGroup];
+    [renderEncoder endEncoding];
+    [commandBuffer presentDrawable:view.currentDrawable];
+    [commandBuffer commit];
+}
+
+-(void)mtkView:(MTKView*)view drawableSizeWillChange:(CGSize)size_ {
+    // Handle size changes if necessary
+}
+
+#pragma mark - Interaction
+-(void)updateIOWithTouchEvent:(UIEvent *)event {
+    UITouch *anyTouch = event.allTouches.anyObject;
+    CGPoint touchLocation = [anyTouch locationInView:self.view];
+    ImGuiIO &io = ImGui::GetIO();
+    io.AddMousePosEvent(touchLocation.x, touchLocation.y);
+
+    BOOL hasActiveTouch = NO;
+    for (UITouch *touch in event.allTouches) {
+        if (touch.phase != UITouchPhaseEnded && touch.phase != UITouchPhaseCancelled) {
+            hasActiveTouch = YES;
+            break;
+        }
+    }
+    io.AddMouseButtonEvent(0, hasActiveTouch);
+}
+
+-(void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event { [self updateIOWithTouchEvent:event]; }
+-(void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event { [self updateIOWithTouchEvent:event]; }
+-(void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event { [self updateIOWithTouchEvent:event]; }
+-(void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event { [self updateIOWithTouchEvent:event]; }
+
+static bool GetInsideFov(float ScreenWidth, float ScreenHeight, Vector2 PlayerBone, float FovRadius) {
+    Vector2 Cenpoint;
+    Cenpoint.X = PlayerBone.X - (ScreenWidth / 2);
+    Cenpoint.Y = PlayerBone.Y - (ScreenHeight / 2);
+    return (Cenpoint.X * Cenpoint.X + Cenpoint.Y * Cenpoint.Y <= FovRadius * FovRadius);
+}
+
+void Aimbot() {
+    if (!CheatState::enable_aimbot) return;
+
+    Matrix4x4 viewMatrix = GetWorldToCamera();
+    Matrix4x4 projectionMatrix = GetProjectionMatrixInternal();
+    float closestDistance = std::numeric_limits<float>::infinity();
+    Vector2 closestTargetScreenPos = Vector2(0, 0);
+    Vector3 closestTargetWorldPos = Vector3(0, 0);
+
+    void* (*getLocalPawn)() = (void *(*)())getRealOffset(0x1018C1E04); // public static Pawn get_LocalPawn() { }
+    void* localPawn = getLocalPawn();
+    if (!localPawn) return;
+
+    // Aim Trigger Logic
+    if (CheatState::aim_trigger == 1) {
+        bool (*GetIsFiring)(void *) = (bool (*)(void *))getRealOffset(0x101A85014); // public bool GetIsFiring() { }
+        if (!GetIsFiring(localPawn)) return;
+    } else if (CheatState::aim_trigger == 2) {
+        bool (*GetIsAiming)(void *) = (bool (*)(void *))getRealOffset(0x1011D54D4); // public bool IsAiming() { }
+        if (!GetIsAiming(localPawn)) return;
+    }
+
+    void* (*getGameInstance)() = (void *(*)())getRealOffset(0x101894B20); // public static BaseGame get_Game() { }
+    void* gameInstance = getGameInstance();
+    if (!gameInstance) return;
+
+    monoList<void **> *enemyList = *(monoList<void **>**)((uint64_t)gameInstance + 0x168); // private readonly PawnList EnemyPawns
+    if (!enemyList) return;
+
+    int enemyCount = enemyList->getSize();
+    for (int i = 0; i < enemyCount; i++) {
+        void* enemyPawn = enemyList->getItems()[i];
+        if (!enemyPawn) continue;
+
+        bool isAlive = false;
+        if (*IsAlive != nullptr) {
+            isAlive = IsAlive(enemyPawn);
+        }
+        if (!isAlive) continue;
+
+        Vector3 enemyPositionWorld = GetPlayerPosition(enemyPawn);
+        Vector3 localPosition = GetPlayerPosition(localPawn);
+        float distance = Vector3::Distance(localPosition, enemyPositionWorld);
+
+        // Check if the enemy is within the Max Distance
+        if (distance > CheatState::max_distance) continue;
+
+        void* headBone = *(void **)((uint64_t) enemyPawn + 0x2E8); // protected Transform m_HeadBone 
+        if (!headBone) continue;
+
+        Vector3 targetPosition = GetTransformPositionInternal(headBone);
+        if (CheatState::aim_location == 1) {
+            targetPosition.y -= 0.2f; // Aim at chest
+        } else if (CheatState::aim_location == 2) {
+            targetPosition.y -= 0.4f; // Aim at waist
+        }
+
+        Vector4 targetPositionView = GetViewCoords(targetPosition, viewMatrix);
+        Vector4 targetPositionClip = GetClipCoords(targetPositionView, projectionMatrix);
+        Vector3 targetPositionNormalized = NormalizeCoords(targetPositionClip);
+        Vector2 targetPositionScreen = GetScreenCoords(targetPositionNormalized);
+
+        // Visibility Check: Ensure the enemy is on the screen
+        if (targetPositionScreen.X < 0 || targetPositionScreen.X > kWidth ||
+            targetPositionScreen.Y < 0 || targetPositionScreen.Y > kHeight) {
+            continue; // Skip if the enemy is off-screen
+        }
+
+        // Behind-the-Player Check: Ensure the enemy is in front of the player
+        if (targetPositionClip.Z < 0.01f) {
+            continue; // Skip if the enemy is behind the player
+        }
+
+        // FOV Check: Ensure the enemy is within the FOV
+        if (CheatState::aim_target == 1) {
+            if (!GetInsideFov(kWidth, kHeight, targetPositionScreen, CheatState::circleSizeValue)) {
+                continue; } // Skip if the enemy is outside the FOV
+        }
+
+        // Logic for closest target inside the middle of the FOV
+        if (distance < closestDistance) {
+            closestDistance = distance;
+            closestTargetScreenPos = targetPositionScreen;
+            closestTargetWorldPos = targetPosition;
+        }
+    }
+
+    // If a valid target is found, adjust aim
+    if (closestDistance != std::numeric_limits<float>::infinity()) {
+        void* mainCamera = GetMainCamera();
+        if (!mainCamera) return;
+
+        void* mainView = GetComponentTransform(mainCamera);
+        if (!mainView) return;
+
+        Vector3 mainViewPos = GetTransformPositionInternal(mainView);
+        void (*setAimRotation)(void*, Quaternion) = (void (*)(void*, Quaternion))getRealOffset(0x1011DD39C); // public virtual void SetAimRotation(Quaternion rotation) { }
+        Quaternion (*getAimRotation)(void*) = (Quaternion (*)(void*))getRealOffset(0x1011C85CC); // public virtual Quaternion get_AimRotation() { }
+
+        Quaternion currentAimRotation = getAimRotation(localPawn);
+        Quaternion targetAimRotation = Quaternion::LookRotation(closestTargetWorldPos - mainViewPos, Vector3::Up());
+        Quaternion finalAimRotation = Quaternion::Lerp(currentAimRotation, targetAimRotation, CheatState::aim_speed);
+        setAimRotation(localPawn, finalAimRotation);
+    }
+}
+
+bool isJailbroken() {
+    //Rootfull
+    if ([[NSFileManager defaultManager] fileExistsAtPath:@"/Library/MobileSubstrate/MobileSubstrate.dylib"]) {
+        return true;
+    }
+    if ([[NSFileManager defaultManager] fileExistsAtPath:@"/bin/bash"]) {
+        return true;
+    }
+    if ([[NSFileManager defaultManager] fileExistsAtPath:@"/etc/apt"]) {
+        return true;
+    }
+
+    if ([[NSFileManager defaultManager] fileExistsAtPath:@"/usr/sbin/sshd"]) {
+        return true;
+    }
+
+    if ([[UIApplication sharedApplication] canOpenURL:[NSURL URLWithString:@"cydia://package/Check.Packages"]]) {
+        return true;
+    }
+    //Rootless
+    if ([[NSFileManager defaultManager] fileExistsAtPath:@"/var/jb/usr/sbin/sshd"]) {
+        return true;
+    }
+
+    if ([[NSFileManager defaultManager] fileExistsAtPath:@"/var/jb"]) {
+        return true;
+    }
+
+    if ([[UIApplication sharedApplication] canOpenURL:[NSURL URLWithString:@"sileo://source/Check.Packages"]]) {
+        return true;
+    }
+    return false;
+}
+
+@end
